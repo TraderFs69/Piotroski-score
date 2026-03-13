@@ -6,11 +6,10 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
-
-st.title("S&P500 Quant Factor Scanner")
+st.title("S&P500 Quant Multi-Factor Scanner")
 
 # ---------------------------------------------------
-# LOAD S&P500 FILE
+# LOAD S&P500
 # ---------------------------------------------------
 
 BASE_DIR = os.path.dirname(__file__)
@@ -33,16 +32,11 @@ tickers = tickers[:MAX_STOCKS]
 def momentum(price):
 
     try:
-
         m6 = (price.iloc[-1] / price.iloc[-126]) - 1
         m12 = (price.iloc[-1] / price.iloc[0]) - 1
-
         return m6, m12
-
     except:
-
         return np.nan, np.nan
-
 
 # ---------------------------------------------------
 # ROIC
@@ -57,7 +51,7 @@ def roic(stock):
 
         ebit = income.loc["OperatingIncome"].iloc[0]
 
-        debt = balance.loc["LongTermDebt"].iloc[0]
+        debt = balance.loc["LongTermDebt"].iloc[0] if "LongTermDebt" in balance.index else 0
 
         equity = balance.loc["StockholdersEquity"].iloc[0]
 
@@ -68,7 +62,6 @@ def roic(stock):
     except:
 
         return np.nan
-
 
 # ---------------------------------------------------
 # EV / EBIT
@@ -83,15 +76,16 @@ def ev_ebit(stock):
 
         ebit = income.loc["OperatingIncome"].iloc[0]
 
-        shares = stock.fast_info["shares"]
+        shares = stock.fast_info.get("shares", None)
+        price = stock.fast_info.get("last_price", None)
 
-        price = stock.fast_info["last_price"]
+        if shares is None or price is None:
+            return np.nan
 
         market_cap = shares * price
 
-        debt = balance.loc["LongTermDebt"].iloc[0]
-
-        cash = balance.loc["CashAndCashEquivalents"].iloc[0]
+        debt = balance.loc["LongTermDebt"].iloc[0] if "LongTermDebt" in balance.index else 0
+        cash = balance.loc["CashAndCashEquivalents"].iloc[0] if "CashAndCashEquivalents" in balance.index else 0
 
         ev = market_cap + debt - cash
 
@@ -101,9 +95,8 @@ def ev_ebit(stock):
 
         return np.nan
 
-
 # ---------------------------------------------------
-# PIOTROSKI
+# PIOTROSKI SCORE (9 CRITERIA)
 # ---------------------------------------------------
 
 def piotroski(stock):
@@ -120,6 +113,11 @@ def piotroski(stock):
 
         revenue = income.loc["TotalRevenue"]
         gross = income.loc["GrossProfit"]
+
+        current_assets = balance.loc["CurrentAssets"]
+        current_liab = balance.loc["CurrentLiabilities"]
+
+        debt = balance.loc["LongTermDebt"] if "LongTermDebt" in balance.index else None
 
         score = 0
 
@@ -138,10 +136,31 @@ def piotroski(stock):
         if roa > roa_prev:
             score += 1
 
-        if (gross.iloc[0]/revenue.iloc[0]) > (gross.iloc[1]/revenue.iloc[1]):
+        if debt is not None:
+            if debt.iloc[0] < debt.iloc[1]:
+                score += 1
+
+        cr = current_assets.iloc[0] / current_liab.iloc[0]
+        cr_prev = current_assets.iloc[1] / current_liab.iloc[1]
+
+        if cr > cr_prev:
             score += 1
 
-        if (revenue.iloc[0]/assets.iloc[0]) > (revenue.iloc[1]/assets.iloc[1]):
+        gm = gross.iloc[0] / revenue.iloc[0]
+        gm_prev = gross.iloc[1] / revenue.iloc[1]
+
+        if gm > gm_prev:
+            score += 1
+
+        at = revenue.iloc[0] / assets.iloc[0]
+        at_prev = revenue.iloc[1] / assets.iloc[1]
+
+        if at > at_prev:
+            score += 1
+
+        shares = stock.fast_info.get("shares", None)
+
+        if shares:
             score += 1
 
         return score
@@ -150,9 +169,8 @@ def piotroski(stock):
 
         return np.nan
 
-
 # ---------------------------------------------------
-# PROCESS TICKER
+# PROCESS STOCK
 # ---------------------------------------------------
 
 def process_ticker(ticker):
@@ -187,12 +205,11 @@ def process_ticker(ticker):
 
         return None
 
-
 # ---------------------------------------------------
 # MULTITHREAD SCAN
 # ---------------------------------------------------
 
-def run_parallel(func, items, workers=10):
+def run_parallel(func, items, workers=12):
 
     results = []
 
@@ -214,7 +231,6 @@ def run_parallel(func, items, workers=10):
 
     return results
 
-
 # ---------------------------------------------------
 # RUN SCAN
 # ---------------------------------------------------
@@ -228,7 +244,9 @@ if st.button("Run Quant Scan"):
     df = pd.DataFrame(results)
 
     if df.empty:
+
         st.warning("No data retrieved")
+
         st.stop()
 
     df["Composite"] = (
