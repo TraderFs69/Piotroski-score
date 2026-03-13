@@ -3,83 +3,107 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
 
-st.title("Russell Quant Factor Scanner")
+st.title("Quant Research Terminal")
 
-# -----------------------------
-# Charger fichier Russell
-# -----------------------------
+# ---------------------------------------------------
+# LOAD RUSSELL UNIVERSE
+# ---------------------------------------------------
 
 BASE_DIR = os.path.dirname(__file__)
 file_path = os.path.join(BASE_DIR, "russell3000_constituents.xlsx")
 
-df = pd.read_excel(file_path)
+df_universe = pd.read_excel(file_path)
 
-tickers = df["Symbol"].dropna().tolist()
+tickers = df_universe["Symbol"].dropna().tolist()
 
-st.write("Total stocks in universe:", len(tickers))
+st.write("Universe size:", len(tickers))
 
-MAX_STOCKS = st.slider("Max stocks to scan", 50, 1000, 300)
+MAX_STOCKS = st.slider("Max stocks to scan", 100, 2000, 500)
 
 tickers = tickers[:MAX_STOCKS]
 
+# ---------------------------------------------------
+# DOWNLOAD PRICE DATA
+# ---------------------------------------------------
 
-# -----------------------------
-# FACTORS
-# -----------------------------
+@st.cache_data
+def download_prices(tickers):
 
-def momentum_6m(price):
+    data = yf.download(
+        tickers,
+        period="1y",
+        group_by="ticker",
+        threads=True,
+        auto_adjust=True
+    )
+
+    return data
+
+prices = download_prices(tickers)
+
+# ---------------------------------------------------
+# MOMENTUM
+# ---------------------------------------------------
+
+def momentum(price):
 
     try:
-        return (price["Close"].iloc[-1] / price["Close"].iloc[-126]) - 1
+
+        m6 = (price.iloc[-1] / price.iloc[-126]) - 1
+        m12 = (price.iloc[-1] / price.iloc[0]) - 1
+
+        return m6, m12
+
     except:
-        return np.nan
+
+        return np.nan, np.nan
 
 
-def momentum_12m(price):
+# ---------------------------------------------------
+# FUNDAMENTALS
+# ---------------------------------------------------
 
-    try:
-        return (price["Close"].iloc[-1] / price["Close"].iloc[0]) - 1
-    except:
-        return np.nan
-
-
-def ev_ebit(info):
+@st.cache_data
+def fundamentals(ticker):
 
     try:
+
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
         ev = info.get("enterpriseValue")
-        ebit = info.get("ebitda")
-
-        if ev and ebit:
-            return ev / ebit
-
-        return np.nan
-
-    except:
-        return np.nan
-
-
-def roic(info):
-
-    try:
         ebit = info.get("ebitda")
         assets = info.get("totalAssets")
 
-        if ebit and assets:
-            return ebit / assets
+        if ev and ebit:
+            ev_ebit = ev / ebit
+        else:
+            ev_ebit = np.nan
 
-        return np.nan
+        if ebit and assets:
+            roic = ebit / assets
+        else:
+            roic = np.nan
+
+        return ev_ebit, roic
 
     except:
-        return np.nan
+
+        return np.nan, np.nan
 
 
-def piotroski(stock):
+# ---------------------------------------------------
+# PIOTROSKI
+# ---------------------------------------------------
+
+def piotroski(ticker):
 
     try:
+
+        stock = yf.Ticker(ticker)
 
         income = stock.financials
         balance = stock.balance_sheet
@@ -105,120 +129,66 @@ def piotroski(stock):
         roa = ni[0] / assets[0]
         roa_prev = ni[1] / assets[1]
 
-        if roa > 0:
-            score += 1
-
-        if cfo[0] > 0:
-            score += 1
-
-        if cfo[0] > ni[0]:
-            score += 1
-
-        if roa > roa_prev:
-            score += 1
-
-        if lt_debt[0] < lt_debt[1]:
-            score += 1
-
-        if (current_assets[0] / current_liab[0]) > (current_assets[1] / current_liab[1]):
-            score += 1
-
-        if (gross[0] / revenue[0]) > (gross[1] / revenue[1]):
-            score += 1
-
-        if (revenue[0] / assets[0]) > (revenue[1] / assets[1]):
-            score += 1
+        if roa > 0: score += 1
+        if cfo[0] > 0: score += 1
+        if cfo[0] > ni[0]: score += 1
+        if roa > roa_prev: score += 1
+        if lt_debt[0] < lt_debt[1]: score += 1
+        if (current_assets[0]/current_liab[0]) > (current_assets[1]/current_liab[1]): score += 1
+        if (gross[0]/revenue[0]) > (gross[1]/revenue[1]): score += 1
+        if (revenue[0]/assets[0]) > (revenue[1]/assets[1]): score += 1
 
         return score
 
     except:
+
         return np.nan
 
 
-# -----------------------------
-# PROCESS TICKER
-# -----------------------------
-
-@st.cache_data(show_spinner=False)
-def process_ticker(ticker):
-
-    try:
-
-        stock = yf.Ticker(ticker)
-
-        price = stock.history(period="1y")
-
-        if price.empty:
-            return None
-
-        info = stock.info
-
-        p = piotroski(stock)
-
-        m6 = momentum_6m(price)
-
-        m12 = momentum_12m(price)
-
-        ev = ev_ebit(info)
-
-        r = roic(info)
-
-        return {
-            "Ticker": ticker,
-            "Piotroski": p,
-            "Momentum6M": m6,
-            "Momentum12M": m12,
-            "EV_EBIT": ev,
-            "ROIC": r
-        }
-
-    except:
-
-        return None
-
-
-# -----------------------------
-# MULTITHREAD SCAN
-# -----------------------------
-
-def run_parallel(func, items, workers=20):
-
-    results = []
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-
-        futures = [executor.submit(func, item) for item in items]
-
-        for f in futures:
-
-            try:
-
-                r = f.result()
-
-                if r:
-                    results.append(r)
-
-            except:
-                pass
-
-    return results
-
-
-# -----------------------------
-# RUN SCAN
-# -----------------------------
+# ---------------------------------------------------
+# SCAN
+# ---------------------------------------------------
 
 if st.button("Run Quant Scan"):
 
-    with st.spinner("Scanning universe..."):
+    results = []
 
-        results = run_parallel(process_ticker, tickers)
+    progress = st.progress(0)
+
+    for i, ticker in enumerate(tickers):
+
+        try:
+
+            price = prices[ticker]["Close"]
+
+            m6, m12 = momentum(price)
+
+            ev_ebit, roic = fundamentals(ticker)
+
+            p = piotroski(ticker)
+
+            results.append({
+
+                "Ticker": ticker,
+                "Piotroski": p,
+                "Momentum6M": m6,
+                "Momentum12M": m12,
+                "EV_EBIT": ev_ebit,
+                "ROIC": roic
+
+            })
+
+        except:
+
+            pass
+
+        progress.progress((i+1)/len(tickers))
 
     df = pd.DataFrame(results)
 
-    if df.empty:
-        st.warning("No data retrieved.")
-        st.stop()
+# ---------------------------------------------------
+# RANKING
+# ---------------------------------------------------
 
     df["Composite"] = (
         df["Piotroski"].rank(ascending=False)
@@ -230,12 +200,46 @@ if st.button("Run Quant Scan"):
 
     df = df.sort_values("Composite")
 
-    st.success("Scan Complete")
+# ---------------------------------------------------
+# OUTPUT
+# ---------------------------------------------------
 
-    st.dataframe(df, height=700)
+    st.success("Scan complete")
+
+    st.subheader("Top Quant Stocks")
+
+    st.dataframe(df.head(50), height=600)
+
+# ---------------------------------------------------
+# HEATMAP
+# ---------------------------------------------------
+
+    st.subheader("Factor Heatmap")
+
+    heat = df.set_index("Ticker")[
+        ["Piotroski","Momentum6M","Momentum12M","EV_EBIT","ROIC"]
+    ]
+
+    st.dataframe(heat.head(50))
+
+# ---------------------------------------------------
+# PORTFOLIO
+# ---------------------------------------------------
+
+    st.subheader("Quant Portfolio")
+
+    portfolio = df.head(20)
+
+    portfolio["Weight"] = 1 / len(portfolio)
+
+    st.dataframe(portfolio)
+
+# ---------------------------------------------------
+# EXPORT
+# ---------------------------------------------------
 
     st.download_button(
-        "Download Results CSV",
+        "Download Results",
         df.to_csv(index=False),
         "quant_results.csv"
     )
