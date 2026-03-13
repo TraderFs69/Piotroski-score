@@ -21,6 +21,20 @@ MAX_STOCKS=st.slider("Max stocks",10,200,50)
 
 tickers=tickers[:MAX_STOCKS]
 
+
+# ---------------------------------------------------
+# UTILITY FUNCTION
+# ---------------------------------------------------
+
+def find_value(df,names):
+
+    for n in names:
+        if n in df.index:
+            return df.loc[n].iloc[0]
+
+    return None
+
+
 # ---------------------------------------------------
 # MOMENTUM
 # ---------------------------------------------------
@@ -43,6 +57,7 @@ def momentum(stock):
 
         return None,None
 
+
 # ---------------------------------------------------
 # ROIC
 # ---------------------------------------------------
@@ -54,11 +69,26 @@ def roic(stock):
         income=stock.financials
         balance=stock.balance_sheet
 
-        ebit=income.loc["Operating Income"].iloc[0]
+        ebit=find_value(income,[
+            "Operating Income",
+            "OperatingIncome",
+            "EBIT"
+        ])
 
-        debt=balance.loc["Long Term Debt"].iloc[0] if "Long Term Debt" in balance.index else 0
+        debt=find_value(balance,[
+            "Long Term Debt",
+            "LongTermDebt"
+        ])
 
-        equity=balance.loc["Total Stockholder Equity"].iloc[0]
+        equity=find_value(balance,[
+            "Total Stockholder Equity",
+            "StockholdersEquity"
+        ])
+
+        if ebit is None or equity is None:
+            return None
+
+        debt=debt if debt else 0
 
         invested=debt+equity
 
@@ -67,6 +97,7 @@ def roic(stock):
     except:
 
         return None
+
 
 # ---------------------------------------------------
 # EV / EBIT
@@ -79,17 +110,33 @@ def ev_ebit(stock):
         income=stock.financials
         balance=stock.balance_sheet
 
-        ebit=income.loc["Operating Income"].iloc[0]
+        ebit=find_value(income,[
+            "Operating Income",
+            "OperatingIncome",
+            "EBIT"
+        ])
+
+        if ebit is None:
+            return None
 
         price=stock.fast_info["last_price"]
-
         shares=stock.fast_info["shares"]
 
         market_cap=price*shares
 
-        debt=balance.loc["Long Term Debt"].iloc[0] if "Long Term Debt" in balance.index else 0
+        debt=find_value(balance,[
+            "Long Term Debt",
+            "LongTermDebt"
+        ])
 
-        cash=balance.loc["Cash"].iloc[0] if "Cash" in balance.index else 0
+        cash=find_value(balance,[
+            "Cash",
+            "Cash And Cash Equivalents",
+            "CashAndCashEquivalents"
+        ])
+
+        debt=debt if debt else 0
+        cash=cash if cash else 0
 
         ev=market_cap+debt-cash
 
@@ -98,6 +145,7 @@ def ev_ebit(stock):
     except:
 
         return None
+
 
 # ---------------------------------------------------
 # PIOTROSKI
@@ -111,22 +159,39 @@ def piotroski(stock):
         balance=stock.balance_sheet
         cash=stock.cashflow
 
-        ni=income.loc["Net Income"]
-        assets=balance.loc["Total Assets"]
-        cfo=cash.loc["Total Cash From Operating Activities"]
+        ni=find_value(income,[
+            "Net Income",
+            "NetIncome"
+        ])
+
+        assets=find_value(balance,[
+            "Total Assets",
+            "TotalAssets"
+        ])
+
+        cfo=find_value(cash,[
+            "Total Cash From Operating Activities",
+            "OperatingCashFlow"
+        ])
+
+        if ni is None or assets is None or cfo is None:
+            return None
+
+        ni_prev=income.loc[income.index[0]].iloc[1]
+        assets_prev=balance.loc[balance.index[0]].iloc[1]
 
         score=0
 
-        roa=ni.iloc[0]/assets.iloc[0]
-        roa_prev=ni.iloc[1]/assets.iloc[1]
+        roa=ni/assets
+        roa_prev=ni_prev/assets_prev
 
         if roa>0:
             score+=1
 
-        if cfo.iloc[0]>0:
+        if cfo>0:
             score+=1
 
-        if cfo.iloc[0]>ni.iloc[0]:
+        if cfo>ni:
             score+=1
 
         if roa>roa_prev:
@@ -137,6 +202,7 @@ def piotroski(stock):
     except:
 
         return None
+
 
 # ---------------------------------------------------
 # PROCESS STOCK
@@ -154,9 +220,7 @@ def process_stock(ticker):
             return None
 
         r=roic(stock)
-
         ev=ev_ebit(stock)
-
         p=piotroski(stock)
 
         return{
@@ -171,6 +235,7 @@ def process_stock(ticker):
     except:
 
         return None
+
 
 # ---------------------------------------------------
 # MULTITHREAD
@@ -197,6 +262,7 @@ def run_parallel(func,items):
                 pass
 
     return results
+
 
 # ---------------------------------------------------
 # RUN
