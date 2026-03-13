@@ -1,214 +1,162 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
+import requests
 import os
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
-st.title("S&P500 Quant Multi-Factor Scanner")
+st.title("S&P500 Quant Scanner (Financial Modeling Prep)")
 
-# ---------------------------------------------------
-# LOAD S&P500
-# ---------------------------------------------------
+API_KEY = "0a99uPvKjVkKvQYrjKxvoK7UyO1BekKa"
 
 BASE_DIR = os.path.dirname(__file__)
-file_path = os.path.join(BASE_DIR, "sp500_constituents.xlsx")
+file_path = os.path.join(BASE_DIR,"sp500_constituents.xlsx")
 
 df_universe = pd.read_excel(file_path)
-
 tickers = df_universe["Symbol"].dropna().tolist()
 
-st.write("Universe size:", len(tickers))
+st.write("Universe size:",len(tickers))
 
-MAX_STOCKS = st.slider("Max stocks to scan", 50, 500, 200)
-
+MAX_STOCKS = st.slider("Max stocks",50,500,200)
 tickers = tickers[:MAX_STOCKS]
 
 # ---------------------------------------------------
-# MOMENTUM
+# PRICE MOMENTUM
 # ---------------------------------------------------
 
-def momentum(price):
+def get_price(ticker):
 
-    try:
+    url=f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?serietype=line&apikey={API_KEY}"
 
-        m6 = (price.iloc[-1] / price.iloc[-126]) - 1
-        m12 = (price.iloc[-1] / price.iloc[0]) - 1
+    r=requests.get(url).json()
 
-        return m6, m12
+    if "historical" not in r:
+        return None
 
-    except:
+    df=pd.DataFrame(r["historical"])
 
-        return np.nan, np.nan
+    if len(df)<252:
+        return None
 
-# ---------------------------------------------------
-# FIND EBIT
-# ---------------------------------------------------
+    df=df.sort_values("date")
 
-def get_ebit(income):
+    m6=(df["close"].iloc[-1]/df["close"].iloc[-126])-1
+    m12=(df["close"].iloc[-1]/df["close"].iloc[-252])-1
 
-    for field in [
-        "EBIT",
-        "OperatingIncome",
-        "OperatingIncomeLoss",
-        "Operating Income"
-    ]:
-
-        if field in income.index:
-            return income.loc[field].iloc[0]
-
-    return None
+    return m6,m12
 
 # ---------------------------------------------------
 # ROIC
 # ---------------------------------------------------
 
-def roic(stock):
+def get_roic(ticker):
 
-    try:
+    url=f"https://financialmodelingprep.com/api/v3/key-metrics/{ticker}?limit=1&apikey={API_KEY}"
 
-        income = stock.get_income_stmt()
-        balance = stock.get_balance_sheet()
+    r=requests.get(url).json()
 
-        ebit = get_ebit(income)
-
-        if ebit is None:
-            return np.nan
-
-        debt = 0
-        for name in ["LongTermDebt","Long Term Debt"]:
-            if name in balance.index:
-                debt = balance.loc[name].iloc[0]
-
-        equity = None
-        for name in ["StockholdersEquity","TotalStockholderEquity"]:
-            if name in balance.index:
-                equity = balance.loc[name].iloc[0]
-
-        if equity is None:
-            return np.nan
-
-        invested_capital = debt + equity
-
-        return ebit / invested_capital
-
-    except:
-
+    if len(r)==0:
         return np.nan
+
+    return r[0].get("roic",np.nan)
 
 # ---------------------------------------------------
 # EV / EBIT
 # ---------------------------------------------------
 
-def ev_ebit(stock):
+def get_ev_ebit(ticker):
 
-    try:
+    url=f"https://financialmodelingprep.com/api/v3/ratios/{ticker}?limit=1&apikey={API_KEY}"
 
-        income = stock.get_income_stmt()
-        balance = stock.get_balance_sheet()
+    r=requests.get(url).json()
 
-        ebit = get_ebit(income)
-
-        if ebit is None:
-            return np.nan
-
-        shares = stock.fast_info.get("shares")
-        price = stock.fast_info.get("last_price")
-
-        if shares is None or price is None:
-            return np.nan
-
-        market_cap = shares * price
-
-        debt = 0
-        for name in ["LongTermDebt","Long Term Debt"]:
-            if name in balance.index:
-                debt = balance.loc[name].iloc[0]
-
-        cash = 0
-        for name in ["CashAndCashEquivalents","Cash"]:
-            if name in balance.index:
-                cash = balance.loc[name].iloc[0]
-
-        ev = market_cap + debt - cash
-
-        return ev / ebit
-
-    except:
-
+    if len(r)==0:
         return np.nan
 
+    return r[0].get("enterpriseValueMultiple",np.nan)
+
 # ---------------------------------------------------
-# PIOTROSKI SCORE
+# PIOTROSKI
 # ---------------------------------------------------
 
-def piotroski(stock):
+def get_piotroski(ticker):
 
     try:
 
-        income = stock.get_income_stmt()
-        balance = stock.get_balance_sheet()
-        cash = stock.get_cashflow()
+        income_url=f"https://financialmodelingprep.com/api/v3/income-statement/{ticker}?limit=2&apikey={API_KEY}"
+        balance_url=f"https://financialmodelingprep.com/api/v3/balance-sheet-statement/{ticker}?limit=2&apikey={API_KEY}"
+        cash_url=f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{ticker}?limit=2&apikey={API_KEY}"
 
-        ni = income.loc["NetIncome"]
-        assets = balance.loc["TotalAssets"]
-        cfo = cash.loc["OperatingCashFlow"]
+        income=requests.get(income_url).json()
+        balance=requests.get(balance_url).json()
+        cash=requests.get(cash_url).json()
 
-        revenue = income.loc["TotalRevenue"]
-        gross = income.loc["GrossProfit"]
+        if len(income)<2:
+            return np.nan
 
-        current_assets = balance.loc["CurrentAssets"]
-        current_liab = balance.loc["CurrentLiabilities"]
+        ni=income[0]["netIncome"]
+        ni_prev=income[1]["netIncome"]
 
-        debt = None
-        for name in ["LongTermDebt","Long Term Debt"]:
-            if name in balance.index:
-                debt = balance.loc[name]
+        assets=balance[0]["totalAssets"]
+        assets_prev=balance[1]["totalAssets"]
 
-        score = 0
+        cfo=cash[0]["operatingCashFlow"]
 
-        roa = ni.iloc[0] / assets.iloc[0]
-        roa_prev = ni.iloc[1] / assets.iloc[1]
+        revenue=income[0]["revenue"]
+        revenue_prev=income[1]["revenue"]
 
-        if roa > 0:
-            score += 1
+        gross=income[0]["grossProfit"]
+        gross_prev=income[1]["grossProfit"]
 
-        if cfo.iloc[0] > 0:
-            score += 1
+        debt=balance[0]["longTermDebt"]
+        debt_prev=balance[1]["longTermDebt"]
 
-        if cfo.iloc[0] > ni.iloc[0]:
-            score += 1
+        current_assets=balance[0]["totalCurrentAssets"]
+        current_assets_prev=balance[1]["totalCurrentAssets"]
 
-        if roa > roa_prev:
-            score += 1
+        current_liab=balance[0]["totalCurrentLiabilities"]
+        current_liab_prev=balance[1]["totalCurrentLiabilities"]
 
-        if debt is not None:
-            if debt.iloc[0] < debt.iloc[1]:
-                score += 1
+        score=0
 
-        cr = current_assets.iloc[0] / current_liab.iloc[0]
-        cr_prev = current_assets.iloc[1] / current_liab.iloc[1]
+        roa=ni/assets
+        roa_prev=ni_prev/assets_prev
 
-        if cr > cr_prev:
-            score += 1
+        if roa>0:
+            score+=1
 
-        gm = gross.iloc[0] / revenue.iloc[0]
-        gm_prev = gross.iloc[1] / revenue.iloc[1]
+        if cfo>0:
+            score+=1
 
-        if gm > gm_prev:
-            score += 1
+        if cfo>ni:
+            score+=1
 
-        at = revenue.iloc[0] / assets.iloc[0]
-        at_prev = revenue.iloc[1] / assets.iloc[1]
+        if roa>roa_prev:
+            score+=1
 
-        if at > at_prev:
-            score += 1
+        if debt<debt_prev:
+            score+=1
 
-        shares = stock.fast_info.get("shares")
+        cr=current_assets/current_liab
+        cr_prev=current_assets_prev/current_liab_prev
 
-        if shares:
-            score += 1
+        if cr>cr_prev:
+            score+=1
+
+        gm=gross/revenue
+        gm_prev=gross_prev/revenue_prev
+
+        if gm>gm_prev:
+            score+=1
+
+        at=revenue/assets
+        at_prev=revenue_prev/assets_prev
+
+        if at>at_prev:
+            score+=1
+
+        score+=1
 
         return score
 
@@ -217,33 +165,33 @@ def piotroski(stock):
         return np.nan
 
 # ---------------------------------------------------
-# PROCESS TICKER
+# PROCESS STOCK
 # ---------------------------------------------------
 
 def process_ticker(ticker):
 
     try:
 
-        stock = yf.Ticker(ticker)
+        m=get_price(ticker)
 
-        price = stock.history(period="1y")
-
-        if price.empty:
+        if m is None:
             return None
 
-        m6, m12 = momentum(price["Close"])
+        m6,m12=m
 
-        p = piotroski(stock)
-        r = roic(stock)
-        ev = ev_ebit(stock)
+        roic=get_roic(ticker)
 
-        return {
-            "Ticker": ticker,
-            "Piotroski": p,
-            "Momentum6M": m6,
-            "Momentum12M": m12,
-            "ROIC": r,
-            "EV_EBIT": ev
+        ev=get_ev_ebit(ticker)
+
+        p=get_piotroski(ticker)
+
+        return{
+            "Ticker":ticker,
+            "Piotroski":p,
+            "Momentum6M":m6,
+            "Momentum12M":m12,
+            "ROIC":roic,
+            "EV_EBIT":ev
         }
 
     except:
@@ -251,22 +199,22 @@ def process_ticker(ticker):
         return None
 
 # ---------------------------------------------------
-# MULTITHREAD SCAN
+# MULTITHREAD
 # ---------------------------------------------------
 
-def run_parallel(func, items, workers=10):
+def run_parallel(func,items,workers=10):
 
-    results = []
+    results=[]
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
 
-        futures = [executor.submit(func, item) for item in items]
+        futures=[executor.submit(func,item) for item in items]
 
         for f in futures:
 
             try:
 
-                r = f.result()
+                r=f.result()
 
                 if r:
                     results.append(r)
@@ -280,36 +228,32 @@ def run_parallel(func, items, workers=10):
 # RUN SCAN
 # ---------------------------------------------------
 
-if st.button("Run Quant Scan"):
+if st.button("Run Scan"):
 
-    with st.spinner("Scanning S&P500..."):
+    with st.spinner("Scanning..."):
 
-        results = run_parallel(process_ticker, tickers)
+        results=run_parallel(process_ticker,tickers)
 
-    df = pd.DataFrame(results)
+    df=pd.DataFrame(results)
 
     if df.empty:
-
-        st.warning("No data retrieved")
-
+        st.warning("No data")
         st.stop()
 
-    df["Composite"] = (
+    df["Composite"]=(
         df["Piotroski"].rank(ascending=False)
-        + df["Momentum6M"].rank(ascending=False)
-        + df["Momentum12M"].rank(ascending=False)
-        + df["ROIC"].rank(ascending=False)
-        + df["EV_EBIT"].rank(ascending=True)
+        +df["Momentum6M"].rank(ascending=False)
+        +df["Momentum12M"].rank(ascending=False)
+        +df["ROIC"].rank(ascending=False)
+        +df["EV_EBIT"].rank(ascending=True)
     )
 
-    df = df.sort_values("Composite")
+    df=df.sort_values("Composite")
 
-    st.success("Scan Complete")
-
-    st.dataframe(df, height=700)
+    st.dataframe(df,height=700)
 
     st.download_button(
-        "Download Results CSV",
+        "Download CSV",
         df.to_csv(index=False),
         "quant_results.csv"
     )
