@@ -22,7 +22,6 @@ tickers = df["Symbol"].dropna().tolist()
 
 st.write("Total stocks in universe:", len(tickers))
 
-# Pour éviter que Yahoo bloque
 MAX_STOCKS = st.slider("Max stocks to scan", 50, 1000, 300)
 
 tickers = tickers[:MAX_STOCKS]
@@ -51,7 +50,6 @@ def momentum_12m(price):
 def ev_ebit(info):
 
     try:
-
         ev = info.get("enterpriseValue")
         ebit = info.get("ebitda")
 
@@ -67,7 +65,6 @@ def ev_ebit(info):
 def roic(info):
 
     try:
-
         ebit = info.get("ebitda")
         assets = info.get("totalAssets")
 
@@ -142,6 +139,7 @@ def piotroski(stock):
 # PROCESS TICKER
 # -----------------------------
 
+@st.cache_data(show_spinner=False)
 def process_ticker(ticker):
 
     try:
@@ -149,6 +147,9 @@ def process_ticker(ticker):
         stock = yf.Ticker(ticker)
 
         price = stock.history(period="1y")
+
+        if price.empty:
+            return None
 
         info = stock.info
 
@@ -215,7 +216,9 @@ if st.button("Run Quant Scan"):
 
     df = pd.DataFrame(results)
 
-    # Ranking composite
+    if df.empty:
+        st.warning("No data retrieved.")
+        st.stop()
 
     df["Composite"] = (
         df["Piotroski"].rank(ascending=False)
