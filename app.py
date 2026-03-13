@@ -6,7 +6,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
-
 st.title("S&P500 Quant Multi-Factor Scanner")
 
 # ---------------------------------------------------
@@ -44,6 +43,24 @@ def momentum(price):
         return np.nan, np.nan
 
 # ---------------------------------------------------
+# FIND EBIT
+# ---------------------------------------------------
+
+def get_ebit(income):
+
+    for field in [
+        "EBIT",
+        "OperatingIncome",
+        "OperatingIncomeLoss",
+        "Operating Income"
+    ]:
+
+        if field in income.index:
+            return income.loc[field].iloc[0]
+
+    return None
+
+# ---------------------------------------------------
 # ROIC
 # ---------------------------------------------------
 
@@ -54,10 +71,7 @@ def roic(stock):
         income = stock.get_income_stmt()
         balance = stock.get_balance_sheet()
 
-        ebit = None
-        for name in ["OperatingIncome","EBIT","Operating Income"]:
-            if name in income.index:
-                ebit = income.loc[name].iloc[0]
+        ebit = get_ebit(income)
 
         if ebit is None:
             return np.nan
@@ -94,16 +108,13 @@ def ev_ebit(stock):
         income = stock.get_income_stmt()
         balance = stock.get_balance_sheet()
 
-        ebit = None
-        for name in ["OperatingIncome","EBIT","Operating Income"]:
-            if name in income.index:
-                ebit = income.loc[name].iloc[0]
+        ebit = get_ebit(income)
 
         if ebit is None:
             return np.nan
 
-        shares = stock.fast_info.get("shares", None)
-        price = stock.fast_info.get("last_price", None)
+        shares = stock.fast_info.get("shares")
+        price = stock.fast_info.get("last_price")
 
         if shares is None or price is None:
             return np.nan
@@ -194,7 +205,7 @@ def piotroski(stock):
         if at > at_prev:
             score += 1
 
-        shares = stock.fast_info.get("shares", None)
+        shares = stock.fast_info.get("shares")
 
         if shares:
             score += 1
@@ -223,9 +234,7 @@ def process_ticker(ticker):
         m6, m12 = momentum(price["Close"])
 
         p = piotroski(stock)
-
         r = roic(stock)
-
         ev = ev_ebit(stock)
 
         return {
@@ -245,7 +254,7 @@ def process_ticker(ticker):
 # MULTITHREAD SCAN
 # ---------------------------------------------------
 
-def run_parallel(func, items, workers=12):
+def run_parallel(func, items, workers=10):
 
     results = []
 
