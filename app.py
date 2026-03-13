@@ -48,17 +48,20 @@ def ev_ebit(stock):
 
     try:
 
-        info = stock.info
         balance = stock.balance_sheet
         income = stock.financials
 
-        market_cap = info.get("marketCap")
+        debt = balance.loc["Long Term Debt"].iloc[0]
 
-        debt = balance.loc["Long Term Debt"][0]
+        cash = balance.loc["Cash"].iloc[0]
 
-        cash = balance.loc["Cash"][0]
+        shares = stock.fast_info["shares"]
 
-        ebit = income.loc["Operating Income"][0]
+        price = stock.fast_info["last_price"]
+
+        market_cap = shares * price
+
+        ebit = income.loc["Operating Income"].iloc[0]
 
         enterprise_value = market_cap + debt - cash
 
@@ -80,11 +83,11 @@ def roic(stock):
         income = stock.financials
         balance = stock.balance_sheet
 
-        ebit = income.loc["Operating Income"][0]
+        ebit = income.loc["Operating Income"].iloc[0]
 
-        debt = balance.loc["Long Term Debt"][0]
+        debt = balance.loc["Long Term Debt"].iloc[0]
 
-        equity = balance.loc["Total Stockholder Equity"][0]
+        equity = balance.loc["Total Stockholder Equity"].iloc[0]
 
         invested_capital = debt + equity
 
@@ -119,25 +122,25 @@ def piotroski(stock):
 
         score = 0
 
-        roa = ni[0] / assets[0]
-        roa_prev = ni[1] / assets[1]
+        roa = ni.iloc[0] / assets.iloc[0]
+        roa_prev = ni.iloc[1] / assets.iloc[1]
 
         if roa > 0:
             score += 1
 
-        if cfo[0] > 0:
+        if cfo.iloc[0] > 0:
             score += 1
 
-        if cfo[0] > ni[0]:
+        if cfo.iloc[0] > ni.iloc[0]:
             score += 1
 
         if roa > roa_prev:
             score += 1
 
-        if (gross[0] / revenue[0]) > (gross[1] / revenue[1]):
+        if (gross.iloc[0] / revenue.iloc[0]) > (gross.iloc[1] / revenue.iloc[1]):
             score += 1
 
-        if (revenue[0] / assets[0]) > (revenue[1] / assets[1]):
+        if (revenue.iloc[0] / assets.iloc[0]) > (revenue.iloc[1] / assets.iloc[1]):
             score += 1
 
         return score
@@ -230,7 +233,7 @@ if st.button("Run Quant Scan"):
         st.stop()
 
     # ---------------------------------------------------
-    # COMPOSITE RANK
+    # COMPOSITE SCORE
     # ---------------------------------------------------
 
     df["Composite"] = (
