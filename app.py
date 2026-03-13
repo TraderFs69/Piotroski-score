@@ -7,14 +7,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
 
-st.title("Russell Quant Factor Scanner")
+st.title("S&P500 Quant Factor Scanner")
 
 # ---------------------------------------------------
-# LOAD UNIVERSE
+# LOAD S&P500 FILE
 # ---------------------------------------------------
 
 BASE_DIR = os.path.dirname(__file__)
-file_path = os.path.join(BASE_DIR, "russell3000_constituents.xlsx")
+file_path = os.path.join(BASE_DIR, "sp500_constituents.xlsx")
 
 df_universe = pd.read_excel(file_path)
 
@@ -22,9 +22,10 @@ tickers = df_universe["Symbol"].dropna().tolist()
 
 st.write("Universe size:", len(tickers))
 
-MAX_STOCKS = st.slider("Max stocks to scan", 50, 1000, 300)
+MAX_STOCKS = st.slider("Max stocks to scan", 50, 500, 200)
 
 tickers = tickers[:MAX_STOCKS]
+
 
 # ---------------------------------------------------
 # MOMENTUM
@@ -41,38 +42,6 @@ def momentum(price):
 
 
 # ---------------------------------------------------
-# EV / EBIT
-# ---------------------------------------------------
-
-def ev_ebit(stock):
-
-    try:
-
-        balance = stock.balance_sheet
-        income = stock.financials
-
-        debt = balance.loc["Long Term Debt"].iloc[0]
-
-        cash = balance.loc["Cash"].iloc[0]
-
-        shares = stock.fast_info["shares"]
-
-        price = stock.fast_info["last_price"]
-
-        market_cap = shares * price
-
-        ebit = income.loc["Operating Income"].iloc[0]
-
-        enterprise_value = market_cap + debt - cash
-
-        return enterprise_value / ebit
-
-    except:
-
-        return np.nan
-
-
-# ---------------------------------------------------
 # ROIC
 # ---------------------------------------------------
 
@@ -83,11 +52,25 @@ def roic(stock):
         income = stock.financials
         balance = stock.balance_sheet
 
-        ebit = income.loc["Operating Income"].iloc[0]
+        ebit = None
+        for name in ["Operating Income","EBIT"]:
+            if name in income.index:
+                ebit = income.loc[name].iloc[0]
 
-        debt = balance.loc["Long Term Debt"].iloc[0]
+        if ebit is None:
+            return np.nan
 
-        equity = balance.loc["Total Stockholder Equity"].iloc[0]
+        debt = 0
+        if "Long Term Debt" in balance.index:
+            debt = balance.loc["Long Term Debt"].iloc[0]
+
+        equity = None
+        for name in ["Total Stockholder Equity","Stockholders Equity"]:
+            if name in balance.index:
+                equity = balance.loc[name].iloc[0]
+
+        if equity is None:
+            return np.nan
 
         invested_capital = debt + equity
 
@@ -113,12 +96,23 @@ def piotroski(stock):
         if income.shape[1] < 2:
             return np.nan
 
+        if "Net Income" not in income.index:
+            return np.nan
+
         ni = income.loc["Net Income"]
+
+        if "Total Assets" not in balance.index:
+            return np.nan
+
         assets = balance.loc["Total Assets"]
+
+        if "Total Cash From Operating Activities" not in cash.index:
+            return np.nan
+
         cfo = cash.loc["Total Cash From Operating Activities"]
 
-        revenue = income.loc["Total Revenue"]
-        gross = income.loc["Gross Profit"]
+        revenue = income.loc["Total Revenue"] if "Total Revenue" in income.index else None
+        gross = income.loc["Gross Profit"] if "Gross Profit" in income.index else None
 
         score = 0
 
@@ -137,13 +131,54 @@ def piotroski(stock):
         if roa > roa_prev:
             score += 1
 
-        if (gross.iloc[0] / revenue.iloc[0]) > (gross.iloc[1] / revenue.iloc[1]):
-            score += 1
+        if revenue is not None and gross is not None:
 
-        if (revenue.iloc[0] / assets.iloc[0]) > (revenue.iloc[1] / assets.iloc[1]):
-            score += 1
+            if (gross.iloc[0]/revenue.iloc[0]) > (gross.iloc[1]/revenue.iloc[1]):
+                score += 1
+
+            if (revenue.iloc[0]/assets.iloc[0]) > (revenue.iloc[1]/assets.iloc[1]):
+                score += 1
 
         return score
+
+    except:
+
+        return np.nan
+
+
+# ---------------------------------------------------
+# EV / EBIT
+# ---------------------------------------------------
+
+def ev_ebit(stock):
+
+    try:
+
+        income = stock.financials
+        balance = stock.balance_sheet
+
+        ebit = None
+        for name in ["Operating Income","EBIT"]:
+            if name in income.index:
+                ebit = income.loc[name].iloc[0]
+
+        if ebit is None:
+            return np.nan
+
+        shares = stock.fast_info.get("shares",None)
+        price = stock.fast_info.get("last_price",None)
+
+        if shares is None or price is None:
+            return np.nan
+
+        market_cap = shares * price
+
+        debt = balance.loc["Long Term Debt"].iloc[0] if "Long Term Debt" in balance.index else 0
+        cash = balance.loc["Cash"].iloc[0] if "Cash" in balance.index else 0
+
+        ev = market_cap + debt - cash
+
+        return ev / ebit
 
     except:
 
@@ -167,19 +202,19 @@ def process_ticker(ticker):
 
         m6, m12 = momentum(price["Close"])
 
-        ev = ev_ebit(stock)
+        p = piotroski(stock)
 
         r = roic(stock)
 
-        p = piotroski(stock)
+        ev = ev_ebit(stock)
 
         return {
             "Ticker": ticker,
             "Piotroski": p,
             "Momentum6M": m6,
             "Momentum12M": m12,
-            "EV_EBIT": ev,
-            "ROIC": r
+            "ROIC": r,
+            "EV_EBIT": ev
         }
 
     except:
@@ -188,10 +223,10 @@ def process_ticker(ticker):
 
 
 # ---------------------------------------------------
-# MULTITHREAD
+# MULTITHREAD SCAN
 # ---------------------------------------------------
 
-def run_parallel(func, items, workers=20):
+def run_parallel(func, items, workers=15):
 
     results = []
 
@@ -220,21 +255,15 @@ def run_parallel(func, items, workers=20):
 
 if st.button("Run Quant Scan"):
 
-    with st.spinner("Scanning universe..."):
+    with st.spinner("Scanning S&P500..."):
 
         results = run_parallel(process_ticker, tickers)
 
     df = pd.DataFrame(results)
 
     if df.empty:
-
         st.warning("No data retrieved")
-
         st.stop()
-
-    # ---------------------------------------------------
-    # COMPOSITE SCORE
-    # ---------------------------------------------------
 
     df["Composite"] = (
         df["Piotroski"].rank(ascending=False)
