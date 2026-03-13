@@ -3,13 +3,14 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
 
-st.title("Quant Research Terminal")
+st.title("Russell Quant Factor Scanner")
 
 # ---------------------------------------------------
-# LOAD RUSSELL UNIVERSE
+# LOAD UNIVERSE
 # ---------------------------------------------------
 
 BASE_DIR = os.path.dirname(__file__)
@@ -21,28 +22,9 @@ tickers = df_universe["Symbol"].dropna().tolist()
 
 st.write("Universe size:", len(tickers))
 
-MAX_STOCKS = st.slider("Max stocks to scan", 100, 2000, 500)
+MAX_STOCKS = st.slider("Max stocks to scan", 50, 1000, 300)
 
 tickers = tickers[:MAX_STOCKS]
-
-# ---------------------------------------------------
-# DOWNLOAD PRICE DATA
-# ---------------------------------------------------
-
-@st.cache_data
-def download_prices(tickers):
-
-    data = yf.download(
-        tickers,
-        period="1y",
-        group_by="ticker",
-        threads=True,
-        auto_adjust=True
-    )
-
-    return data
-
-prices = download_prices(tickers)
 
 # ---------------------------------------------------
 # MOMENTUM
@@ -51,59 +33,75 @@ prices = download_prices(tickers)
 def momentum(price):
 
     try:
-
         m6 = (price.iloc[-1] / price.iloc[-126]) - 1
         m12 = (price.iloc[-1] / price.iloc[0]) - 1
-
         return m6, m12
-
     except:
-
         return np.nan, np.nan
 
 
 # ---------------------------------------------------
-# FUNDAMENTALS
+# EV / EBIT
 # ---------------------------------------------------
 
-@st.cache_data
-def fundamentals(ticker):
+def ev_ebit(stock):
 
     try:
 
-        stock = yf.Ticker(ticker)
         info = stock.info
+        balance = stock.balance_sheet
+        income = stock.financials
 
-        ev = info.get("enterpriseValue")
-        ebit = info.get("ebitda")
-        assets = info.get("totalAssets")
+        market_cap = info.get("marketCap")
 
-        if ev and ebit:
-            ev_ebit = ev / ebit
-        else:
-            ev_ebit = np.nan
+        debt = balance.loc["Long Term Debt"][0]
 
-        if ebit and assets:
-            roic = ebit / assets
-        else:
-            roic = np.nan
+        cash = balance.loc["Cash"][0]
 
-        return ev_ebit, roic
+        ebit = income.loc["Operating Income"][0]
+
+        enterprise_value = market_cap + debt - cash
+
+        return enterprise_value / ebit
 
     except:
 
-        return np.nan, np.nan
+        return np.nan
+
+
+# ---------------------------------------------------
+# ROIC
+# ---------------------------------------------------
+
+def roic(stock):
+
+    try:
+
+        income = stock.financials
+        balance = stock.balance_sheet
+
+        ebit = income.loc["Operating Income"][0]
+
+        debt = balance.loc["Long Term Debt"][0]
+
+        equity = balance.loc["Total Stockholder Equity"][0]
+
+        invested_capital = debt + equity
+
+        return ebit / invested_capital
+
+    except:
+
+        return np.nan
 
 
 # ---------------------------------------------------
 # PIOTROSKI
 # ---------------------------------------------------
 
-def piotroski(ticker):
+def piotroski(stock):
 
     try:
-
-        stock = yf.Ticker(ticker)
 
         income = stock.financials
         balance = stock.balance_sheet
@@ -116,27 +114,31 @@ def piotroski(ticker):
         assets = balance.loc["Total Assets"]
         cfo = cash.loc["Total Cash From Operating Activities"]
 
-        lt_debt = balance.loc["Long Term Debt"]
-
         revenue = income.loc["Total Revenue"]
         gross = income.loc["Gross Profit"]
-
-        current_assets = balance.loc["Total Current Assets"]
-        current_liab = balance.loc["Total Current Liabilities"]
 
         score = 0
 
         roa = ni[0] / assets[0]
         roa_prev = ni[1] / assets[1]
 
-        if roa > 0: score += 1
-        if cfo[0] > 0: score += 1
-        if cfo[0] > ni[0]: score += 1
-        if roa > roa_prev: score += 1
-        if lt_debt[0] < lt_debt[1]: score += 1
-        if (current_assets[0]/current_liab[0]) > (current_assets[1]/current_liab[1]): score += 1
-        if (gross[0]/revenue[0]) > (gross[1]/revenue[1]): score += 1
-        if (revenue[0]/assets[0]) > (revenue[1]/assets[1]): score += 1
+        if roa > 0:
+            score += 1
+
+        if cfo[0] > 0:
+            score += 1
+
+        if cfo[0] > ni[0]:
+            score += 1
+
+        if roa > roa_prev:
+            score += 1
+
+        if (gross[0] / revenue[0]) > (gross[1] / revenue[1]):
+            score += 1
+
+        if (revenue[0] / assets[0]) > (revenue[1] / assets[1]):
+            score += 1
 
         return score
 
@@ -146,49 +148,90 @@ def piotroski(ticker):
 
 
 # ---------------------------------------------------
-# SCAN
+# PROCESS TICKER
+# ---------------------------------------------------
+
+def process_ticker(ticker):
+
+    try:
+
+        stock = yf.Ticker(ticker)
+
+        price = stock.history(period="1y")
+
+        if price.empty:
+            return None
+
+        m6, m12 = momentum(price["Close"])
+
+        ev = ev_ebit(stock)
+
+        r = roic(stock)
+
+        p = piotroski(stock)
+
+        return {
+            "Ticker": ticker,
+            "Piotroski": p,
+            "Momentum6M": m6,
+            "Momentum12M": m12,
+            "EV_EBIT": ev,
+            "ROIC": r
+        }
+
+    except:
+
+        return None
+
+
+# ---------------------------------------------------
+# MULTITHREAD
+# ---------------------------------------------------
+
+def run_parallel(func, items, workers=20):
+
+    results = []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+
+        futures = [executor.submit(func, item) for item in items]
+
+        for f in futures:
+
+            try:
+
+                r = f.result()
+
+                if r:
+                    results.append(r)
+
+            except:
+                pass
+
+    return results
+
+
+# ---------------------------------------------------
+# RUN SCAN
 # ---------------------------------------------------
 
 if st.button("Run Quant Scan"):
 
-    results = []
+    with st.spinner("Scanning universe..."):
 
-    progress = st.progress(0)
-
-    for i, ticker in enumerate(tickers):
-
-        try:
-
-            price = prices[ticker]["Close"]
-
-            m6, m12 = momentum(price)
-
-            ev_ebit, roic = fundamentals(ticker)
-
-            p = piotroski(ticker)
-
-            results.append({
-
-                "Ticker": ticker,
-                "Piotroski": p,
-                "Momentum6M": m6,
-                "Momentum12M": m12,
-                "EV_EBIT": ev_ebit,
-                "ROIC": roic
-
-            })
-
-        except:
-
-            pass
-
-        progress.progress((i+1)/len(tickers))
+        results = run_parallel(process_ticker, tickers)
 
     df = pd.DataFrame(results)
 
-# ---------------------------------------------------
-# RANKING
-# ---------------------------------------------------
+    if df.empty:
+
+        st.warning("No data retrieved")
+
+        st.stop()
+
+    # ---------------------------------------------------
+    # COMPOSITE RANK
+    # ---------------------------------------------------
 
     df["Composite"] = (
         df["Piotroski"].rank(ascending=False)
@@ -200,46 +243,12 @@ if st.button("Run Quant Scan"):
 
     df = df.sort_values("Composite")
 
-# ---------------------------------------------------
-# OUTPUT
-# ---------------------------------------------------
+    st.success("Scan Complete")
 
-    st.success("Scan complete")
-
-    st.subheader("Top Quant Stocks")
-
-    st.dataframe(df.head(50), height=600)
-
-# ---------------------------------------------------
-# HEATMAP
-# ---------------------------------------------------
-
-    st.subheader("Factor Heatmap")
-
-    heat = df.set_index("Ticker")[
-        ["Piotroski","Momentum6M","Momentum12M","EV_EBIT","ROIC"]
-    ]
-
-    st.dataframe(heat.head(50))
-
-# ---------------------------------------------------
-# PORTFOLIO
-# ---------------------------------------------------
-
-    st.subheader("Quant Portfolio")
-
-    portfolio = df.head(20)
-
-    portfolio["Weight"] = 1 / len(portfolio)
-
-    st.dataframe(portfolio)
-
-# ---------------------------------------------------
-# EXPORT
-# ---------------------------------------------------
+    st.dataframe(df, height=700)
 
     st.download_button(
-        "Download Results",
+        "Download Results CSV",
         df.to_csv(index=False),
         "quant_results.csv"
     )
