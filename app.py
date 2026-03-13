@@ -1,14 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
+import yfinance as yf
 import os
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
-st.title("S&P500 Quant Scanner (FMP v4)")
-
-API_KEY="TA_CLE_API"
+st.title("S&P500 Quant Scanner")
 
 BASE_DIR=os.path.dirname(__file__)
 file_path=os.path.join(BASE_DIR,"sp500_constituents.xlsx")
@@ -19,113 +17,160 @@ tickers=sp500["Symbol"].tolist()
 
 st.write("Universe size:",len(tickers))
 
-MAX_STOCKS=st.slider("Max stocks to scan",5,100,20)
+MAX_STOCKS=st.slider("Max stocks",10,200,50)
 
 tickers=tickers[:MAX_STOCKS]
 
 # ---------------------------------------------------
-# SAFE REQUEST
+# MOMENTUM
 # ---------------------------------------------------
 
-def request(url):
+def momentum(stock):
 
     try:
 
-        r=requests.get(url)
+        price=stock.history(period="1y")
 
-        if r.status_code!=200:
-            return None
+        if len(price)<200:
+            return None,None
 
-        return r.json()
+        m6=(price["Close"].iloc[-1]/price["Close"].iloc[-126])-1
+        m12=(price["Close"].iloc[-1]/price["Close"].iloc[0])-1
+
+        return m6,m12
+
+    except:
+
+        return None,None
+
+# ---------------------------------------------------
+# ROIC
+# ---------------------------------------------------
+
+def roic(stock):
+
+    try:
+
+        income=stock.financials
+        balance=stock.balance_sheet
+
+        ebit=income.loc["Operating Income"].iloc[0]
+
+        debt=balance.loc["Long Term Debt"].iloc[0] if "Long Term Debt" in balance.index else 0
+
+        equity=balance.loc["Total Stockholder Equity"].iloc[0]
+
+        invested=debt+equity
+
+        return ebit/invested
 
     except:
 
         return None
 
 # ---------------------------------------------------
-# MOMENTUM
+# EV / EBIT
 # ---------------------------------------------------
 
-def get_momentum(ticker):
+def ev_ebit(stock):
 
-    url=f"https://financialmodelingprep.com/api/v4/historical-price/{ticker}?apikey={API_KEY}"
+    try:
 
-    data=request(url)
+        income=stock.financials
+        balance=stock.balance_sheet
 
-    if not data:
-        return None,None
+        ebit=income.loc["Operating Income"].iloc[0]
 
-    df=pd.DataFrame(data)
+        price=stock.fast_info["last_price"]
 
-    if len(df)<100:
-        return None,None
+        shares=stock.fast_info["shares"]
 
-    df=df.sort_values("date")
+        market_cap=price*shares
 
-    m6=(df["close"].iloc[-1]/df["close"].iloc[-min(126,len(df))])-1
-    m12=(df["close"].iloc[-1]/df["close"].iloc[0])-1
+        debt=balance.loc["Long Term Debt"].iloc[0] if "Long Term Debt" in balance.index else 0
 
-    return m6,m12
+        cash=balance.loc["Cash"].iloc[0] if "Cash" in balance.index else 0
 
-# ---------------------------------------------------
-# RATIOS
-# ---------------------------------------------------
+        ev=market_cap+debt-cash
 
-def get_ratios(ticker):
+        return ev/ebit
 
-    url=f"https://financialmodelingprep.com/api/v4/ratios/{ticker}?limit=1&apikey={API_KEY}"
+    except:
 
-    data=request(url)
-
-    if not data:
-        return None,None
-
-    ev=data[0].get("enterpriseValueMultiple",np.nan)
-
-    roa=data[0].get("returnOnAssets",np.nan)
-
-    return ev,roa
+        return None
 
 # ---------------------------------------------------
-# ROIC
+# PIOTROSKI
 # ---------------------------------------------------
 
-def get_roic(ticker):
+def piotroski(stock):
 
-    url=f"https://financialmodelingprep.com/api/v4/key-metrics/{ticker}?limit=1&apikey={API_KEY}"
+    try:
 
-    data=request(url)
+        income=stock.financials
+        balance=stock.balance_sheet
+        cash=stock.cashflow
 
-    if not data:
-        return np.nan
+        ni=income.loc["Net Income"]
+        assets=balance.loc["Total Assets"]
+        cfo=cash.loc["Total Cash From Operating Activities"]
 
-    return data[0].get("roic",np.nan)
+        score=0
+
+        roa=ni.iloc[0]/assets.iloc[0]
+        roa_prev=ni.iloc[1]/assets.iloc[1]
+
+        if roa>0:
+            score+=1
+
+        if cfo.iloc[0]>0:
+            score+=1
+
+        if cfo.iloc[0]>ni.iloc[0]:
+            score+=1
+
+        if roa>roa_prev:
+            score+=1
+
+        return score
+
+    except:
+
+        return None
 
 # ---------------------------------------------------
-# PROCESS
+# PROCESS STOCK
 # ---------------------------------------------------
 
 def process_stock(ticker):
 
-    m6,m12=get_momentum(ticker)
+    try:
 
-    ev,roa=get_ratios(ticker)
+        stock=yf.Ticker(ticker)
 
-    roic=get_roic(ticker)
+        m6,m12=momentum(stock)
 
-    if m6 is None:
+        if m6 is None:
+            return None
+
+        r=roic(stock)
+
+        ev=ev_ebit(stock)
+
+        p=piotroski(stock)
+
+        return{
+            "Ticker":ticker,
+            "Momentum6M":m6,
+            "Momentum12M":m12,
+            "ROIC":r,
+            "EV_EBIT":ev,
+            "Piotroski":p
+        }
+
+    except:
+
         return None
-
-    piotroski=int(roa>0) if roa else 0
-
-    return{
-        "Ticker":ticker,
-        "Momentum6M":m6,
-        "Momentum12M":m12,
-        "EV_EBIT":ev,
-        "ROIC":roic,
-        "Piotroski":piotroski
-    }
 
 # ---------------------------------------------------
 # MULTITHREAD
@@ -135,7 +180,7 @@ def run_parallel(func,items):
 
     results=[]
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
 
         futures=[executor.submit(func,item) for item in items]
 
@@ -167,7 +212,7 @@ if st.button("Run Scan"):
 
     if len(results)==0:
 
-        st.error("No data returned from API")
+        st.error("No data returned")
 
         st.stop()
 
