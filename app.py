@@ -6,6 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
+
 st.title("S&P500 Quant Multi-Factor Scanner")
 
 # ---------------------------------------------------
@@ -32,10 +33,14 @@ tickers = tickers[:MAX_STOCKS]
 def momentum(price):
 
     try:
+
         m6 = (price.iloc[-1] / price.iloc[-126]) - 1
         m12 = (price.iloc[-1] / price.iloc[0]) - 1
+
         return m6, m12
+
     except:
+
         return np.nan, np.nan
 
 # ---------------------------------------------------
@@ -49,11 +54,26 @@ def roic(stock):
         income = stock.get_income_stmt()
         balance = stock.get_balance_sheet()
 
-        ebit = income.loc["OperatingIncome"].iloc[0]
+        ebit = None
+        for name in ["OperatingIncome","EBIT","Operating Income"]:
+            if name in income.index:
+                ebit = income.loc[name].iloc[0]
 
-        debt = balance.loc["LongTermDebt"].iloc[0] if "LongTermDebt" in balance.index else 0
+        if ebit is None:
+            return np.nan
 
-        equity = balance.loc["StockholdersEquity"].iloc[0]
+        debt = 0
+        for name in ["LongTermDebt","Long Term Debt"]:
+            if name in balance.index:
+                debt = balance.loc[name].iloc[0]
+
+        equity = None
+        for name in ["StockholdersEquity","TotalStockholderEquity"]:
+            if name in balance.index:
+                equity = balance.loc[name].iloc[0]
+
+        if equity is None:
+            return np.nan
 
         invested_capital = debt + equity
 
@@ -74,7 +94,13 @@ def ev_ebit(stock):
         income = stock.get_income_stmt()
         balance = stock.get_balance_sheet()
 
-        ebit = income.loc["OperatingIncome"].iloc[0]
+        ebit = None
+        for name in ["OperatingIncome","EBIT","Operating Income"]:
+            if name in income.index:
+                ebit = income.loc[name].iloc[0]
+
+        if ebit is None:
+            return np.nan
 
         shares = stock.fast_info.get("shares", None)
         price = stock.fast_info.get("last_price", None)
@@ -84,8 +110,15 @@ def ev_ebit(stock):
 
         market_cap = shares * price
 
-        debt = balance.loc["LongTermDebt"].iloc[0] if "LongTermDebt" in balance.index else 0
-        cash = balance.loc["CashAndCashEquivalents"].iloc[0] if "CashAndCashEquivalents" in balance.index else 0
+        debt = 0
+        for name in ["LongTermDebt","Long Term Debt"]:
+            if name in balance.index:
+                debt = balance.loc[name].iloc[0]
+
+        cash = 0
+        for name in ["CashAndCashEquivalents","Cash"]:
+            if name in balance.index:
+                cash = balance.loc[name].iloc[0]
 
         ev = market_cap + debt - cash
 
@@ -96,7 +129,7 @@ def ev_ebit(stock):
         return np.nan
 
 # ---------------------------------------------------
-# PIOTROSKI SCORE (9 CRITERIA)
+# PIOTROSKI SCORE
 # ---------------------------------------------------
 
 def piotroski(stock):
@@ -117,7 +150,10 @@ def piotroski(stock):
         current_assets = balance.loc["CurrentAssets"]
         current_liab = balance.loc["CurrentLiabilities"]
 
-        debt = balance.loc["LongTermDebt"] if "LongTermDebt" in balance.index else None
+        debt = None
+        for name in ["LongTermDebt","Long Term Debt"]:
+            if name in balance.index:
+                debt = balance.loc[name]
 
         score = 0
 
@@ -170,7 +206,7 @@ def piotroski(stock):
         return np.nan
 
 # ---------------------------------------------------
-# PROCESS STOCK
+# PROCESS TICKER
 # ---------------------------------------------------
 
 def process_ticker(ticker):
