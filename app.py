@@ -3,9 +3,10 @@ import pandas as pd
 import numpy as np
 import requests
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(layout="wide")
-st.title("S&P500 Quant Scanner (FMP Bulk)")
+st.title("S&P500 Quant Scanner (FMP Free)")
 
 API_KEY="0a99uPvKjVkKvQYrjKxvoK7UyO1BekKa"
 
@@ -18,130 +19,169 @@ tickers=sp500["Symbol"].tolist()
 
 st.write("Universe size:",len(tickers))
 
+MAX_STOCKS=st.slider("Max stocks to scan",10,100,40)
+
+tickers=tickers[:MAX_STOCKS]
 
 # ---------------------------------------------------
-# SAFE API REQUEST
+# MOMENTUM
 # ---------------------------------------------------
 
-def fetch_dataframe(url):
+def get_momentum(ticker):
 
     try:
 
-        r=requests.get(url)
+        url=f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?apikey={API_KEY}"
 
-        if r.status_code!=200:
-            return pd.DataFrame()
+        r=requests.get(url).json()
 
-        data=r.json()
+        if "historical" not in r:
+            return None,None
 
-        if isinstance(data,list):
-            return pd.DataFrame(data)
+        df=pd.DataFrame(r["historical"])
 
-        if isinstance(data,dict):
+        if len(df)<252:
+            return None,None
 
-            if "data" in data:
-                return pd.DataFrame(data["data"])
+        df=df.sort_values("date")
 
-        return pd.DataFrame()
+        m6=(df["close"].iloc[-1]/df["close"].iloc[-126])-1
+        m12=(df["close"].iloc[-1]/df["close"].iloc[-252])-1
+
+        return m6,m12
 
     except:
 
-        return pd.DataFrame()
-
+        return None,None
 
 # ---------------------------------------------------
-# LOAD BULK DATA
+# RATIOS
 # ---------------------------------------------------
 
-@st.cache_data
+def get_ratios(ticker):
 
-def load_bulk():
+    try:
 
-    ratios=fetch_dataframe(
-        f"https://financialmodelingprep.com/api/v3/ratios-bulk?apikey={API_KEY}"
+        url=f"https://financialmodelingprep.com/api/v3/ratios/{ticker}?limit=1&apikey={API_KEY}"
+
+        r=requests.get(url).json()
+
+        if len(r)==0:
+            return None,None
+
+        ev_ebit=r[0].get("enterpriseValueMultiple",np.nan)
+
+        roa=r[0].get("returnOnAssets",np.nan)
+
+        return ev_ebit,roa
+
+    except:
+
+        return None,None
+
+# ---------------------------------------------------
+# ROIC
+# ---------------------------------------------------
+
+def get_roic(ticker):
+
+    try:
+
+        url=f"https://financialmodelingprep.com/api/v3/key-metrics/{ticker}?limit=1&apikey={API_KEY}"
+
+        r=requests.get(url).json()
+
+        if len(r)==0:
+            return None
+
+        return r[0].get("roic",np.nan)
+
+    except:
+
+        return None
+
+# ---------------------------------------------------
+# PROCESS
+# ---------------------------------------------------
+
+def process_stock(ticker):
+
+    m6,m12=get_momentum(ticker)
+
+    ev,roa=get_ratios(ticker)
+
+    roic=get_roic(ticker)
+
+    if m6 is None:
+        return None
+
+    piotroski=int(roa>0)
+
+    return{
+        "Ticker":ticker,
+        "Momentum6M":m6,
+        "Momentum12M":m12,
+        "EV_EBIT":ev,
+        "ROIC":roic,
+        "Piotroski":piotroski
+    }
+
+# ---------------------------------------------------
+# MULTITHREAD
+# ---------------------------------------------------
+
+def run_parallel(func,items):
+
+    results=[]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+
+        futures=[executor.submit(func,item) for item in items]
+
+        for f in futures:
+
+            try:
+
+                r=f.result()
+
+                if r:
+                    results.append(r)
+
+            except:
+                pass
+
+    return results
+
+# ---------------------------------------------------
+# RUN
+# ---------------------------------------------------
+
+if st.button("Run Scan"):
+
+    with st.spinner("Scanning..."):
+
+        results=run_parallel(process_stock,tickers)
+
+    df=pd.DataFrame(results)
+
+    if df.empty:
+
+        st.error("No data returned")
+        st.stop()
+
+    df["Composite"]=(
+        df["Momentum6M"].rank(ascending=False)
+        +df["Momentum12M"].rank(ascending=False)
+        +df["ROIC"].rank(ascending=False)
+        +df["EV_EBIT"].rank(ascending=True)
     )
 
-    metrics=fetch_dataframe(
-        f"https://financialmodelingprep.com/api/v3/key-metrics-bulk?apikey={API_KEY}"
+    df=df.sort_values("Composite")
+
+    st.dataframe(df,height=700)
+
+    st.download_button(
+        "Download CSV",
+        df.to_csv(index=False),
+        "quant_results.csv"
     )
-
-    prices=fetch_dataframe(
-        f"https://financialmodelingprep.com/api/v3/stock/list?apikey={API_KEY}"
-    )
-
-    return ratios,metrics,prices
-
-
-ratios,metrics,prices=load_bulk()
-
-
-if ratios.empty or metrics.empty:
-
-    st.error("API did not return data (check API key or endpoint)")
-    st.stop()
-
-
-# ---------------------------------------------------
-# FILTER S&P500
-# ---------------------------------------------------
-
-ratios=ratios[ratios["symbol"].isin(tickers)]
-metrics=metrics[metrics["symbol"].isin(tickers)]
-prices=prices[prices["symbol"].isin(tickers)]
-
-
-# ---------------------------------------------------
-# MERGE DATA
-# ---------------------------------------------------
-
-df=ratios.merge(metrics,on="symbol",how="left")
-
-df=df.merge(prices[["symbol","price"]],on="symbol",how="left")
-
-df=df.rename(columns={"symbol":"Ticker"})
-
-
-# ---------------------------------------------------
-# FACTORS
-# ---------------------------------------------------
-
-df["ROIC"]=df["roic"]
-
-df["EV_EBIT"]=df["enterpriseValueMultiple"]
-
-df["Momentum6M"]=df["price"]/df["price"].shift(126)
-
-df["Momentum12M"]=df["price"]/df["price"].shift(252)
-
-
-df["Piotroski"]=(
-    (df["returnOnAssets"]>0).astype(int)
-    +(df["returnOnEquity"]>0).astype(int)
-    +(df["grossProfitMargin"]>0).astype(int)
-)
-
-
-# ---------------------------------------------------
-# COMPOSITE
-# ---------------------------------------------------
-
-df["Composite"]=(
-    df["Piotroski"].rank(ascending=False)
-    +df["Momentum6M"].rank(ascending=False)
-    +df["Momentum12M"].rank(ascending=False)
-    +df["ROIC"].rank(ascending=False)
-    +df["EV_EBIT"].rank(ascending=True)
-)
-
-
-df=df.sort_values("Composite")
-
-
-st.dataframe(df,height=700)
-
-
-st.download_button(
-    "Download CSV",
-    df.to_csv(index=False),
-    "quant_results.csv"
-)
