@@ -26,7 +26,6 @@ MAX_STOCKS = st.slider("Max stocks to scan", 50, 500, 200)
 
 tickers = tickers[:MAX_STOCKS]
 
-
 # ---------------------------------------------------
 # MOMENTUM
 # ---------------------------------------------------
@@ -34,10 +33,14 @@ tickers = tickers[:MAX_STOCKS]
 def momentum(price):
 
     try:
+
         m6 = (price.iloc[-1] / price.iloc[-126]) - 1
         m12 = (price.iloc[-1] / price.iloc[0]) - 1
+
         return m6, m12
+
     except:
+
         return np.nan, np.nan
 
 
@@ -49,32 +52,50 @@ def roic(stock):
 
     try:
 
-        income = stock.financials
-        balance = stock.balance_sheet
+        income = stock.get_income_stmt()
+        balance = stock.get_balance_sheet()
 
-        ebit = None
-        for name in ["Operating Income","EBIT"]:
-            if name in income.index:
-                ebit = income.loc[name].iloc[0]
+        ebit = income.loc["OperatingIncome"].iloc[0]
 
-        if ebit is None:
-            return np.nan
+        debt = balance.loc["LongTermDebt"].iloc[0]
 
-        debt = 0
-        if "Long Term Debt" in balance.index:
-            debt = balance.loc["Long Term Debt"].iloc[0]
-
-        equity = None
-        for name in ["Total Stockholder Equity","Stockholders Equity"]:
-            if name in balance.index:
-                equity = balance.loc[name].iloc[0]
-
-        if equity is None:
-            return np.nan
+        equity = balance.loc["StockholdersEquity"].iloc[0]
 
         invested_capital = debt + equity
 
         return ebit / invested_capital
+
+    except:
+
+        return np.nan
+
+
+# ---------------------------------------------------
+# EV / EBIT
+# ---------------------------------------------------
+
+def ev_ebit(stock):
+
+    try:
+
+        income = stock.get_income_stmt()
+        balance = stock.get_balance_sheet()
+
+        ebit = income.loc["OperatingIncome"].iloc[0]
+
+        shares = stock.fast_info["shares"]
+
+        price = stock.fast_info["last_price"]
+
+        market_cap = shares * price
+
+        debt = balance.loc["LongTermDebt"].iloc[0]
+
+        cash = balance.loc["CashAndCashEquivalents"].iloc[0]
+
+        ev = market_cap + debt - cash
+
+        return ev / ebit
 
     except:
 
@@ -89,30 +110,16 @@ def piotroski(stock):
 
     try:
 
-        income = stock.financials
-        balance = stock.balance_sheet
-        cash = stock.cashflow
+        income = stock.get_income_stmt()
+        balance = stock.get_balance_sheet()
+        cash = stock.get_cashflow()
 
-        if income.shape[1] < 2:
-            return np.nan
+        ni = income.loc["NetIncome"]
+        assets = balance.loc["TotalAssets"]
+        cfo = cash.loc["OperatingCashFlow"]
 
-        if "Net Income" not in income.index:
-            return np.nan
-
-        ni = income.loc["Net Income"]
-
-        if "Total Assets" not in balance.index:
-            return np.nan
-
-        assets = balance.loc["Total Assets"]
-
-        if "Total Cash From Operating Activities" not in cash.index:
-            return np.nan
-
-        cfo = cash.loc["Total Cash From Operating Activities"]
-
-        revenue = income.loc["Total Revenue"] if "Total Revenue" in income.index else None
-        gross = income.loc["Gross Profit"] if "Gross Profit" in income.index else None
+        revenue = income.loc["TotalRevenue"]
+        gross = income.loc["GrossProfit"]
 
         score = 0
 
@@ -131,54 +138,13 @@ def piotroski(stock):
         if roa > roa_prev:
             score += 1
 
-        if revenue is not None and gross is not None:
+        if (gross.iloc[0]/revenue.iloc[0]) > (gross.iloc[1]/revenue.iloc[1]):
+            score += 1
 
-            if (gross.iloc[0]/revenue.iloc[0]) > (gross.iloc[1]/revenue.iloc[1]):
-                score += 1
-
-            if (revenue.iloc[0]/assets.iloc[0]) > (revenue.iloc[1]/assets.iloc[1]):
-                score += 1
+        if (revenue.iloc[0]/assets.iloc[0]) > (revenue.iloc[1]/assets.iloc[1]):
+            score += 1
 
         return score
-
-    except:
-
-        return np.nan
-
-
-# ---------------------------------------------------
-# EV / EBIT
-# ---------------------------------------------------
-
-def ev_ebit(stock):
-
-    try:
-
-        income = stock.financials
-        balance = stock.balance_sheet
-
-        ebit = None
-        for name in ["Operating Income","EBIT"]:
-            if name in income.index:
-                ebit = income.loc[name].iloc[0]
-
-        if ebit is None:
-            return np.nan
-
-        shares = stock.fast_info.get("shares",None)
-        price = stock.fast_info.get("last_price",None)
-
-        if shares is None or price is None:
-            return np.nan
-
-        market_cap = shares * price
-
-        debt = balance.loc["Long Term Debt"].iloc[0] if "Long Term Debt" in balance.index else 0
-        cash = balance.loc["Cash"].iloc[0] if "Cash" in balance.index else 0
-
-        ev = market_cap + debt - cash
-
-        return ev / ebit
 
     except:
 
@@ -226,7 +192,7 @@ def process_ticker(ticker):
 # MULTITHREAD SCAN
 # ---------------------------------------------------
 
-def run_parallel(func, items, workers=15):
+def run_parallel(func, items, workers=10):
 
     results = []
 
